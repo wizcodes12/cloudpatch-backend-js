@@ -246,6 +246,8 @@ app.get("/auth/github", (req, res, next) => {
   // Store the client type and return URL
   req.session.clientType = req.query.client || "web";
   req.session.returnTo = req.query.returnTo || "/";
+  // Store the redirectUri if provided (for development mode)
+  req.session.redirectUri = req.query.redirectUri || null;
 
   // Generate state parameter for security
   const state = crypto.randomBytes(16).toString("hex");
@@ -322,10 +324,19 @@ app.get("/auth/github/callback",
         res.setHeader('Content-Type', 'text/html');
         res.send(htmlRedirect);
       } else {
-        // For web, redirect to the frontend with the auth data
-        const frontendUrl = process.env.NODE_ENV === "production" 
-          ? "https://cloudpatch-frontend.onrender.com" 
-          : "http://localhost:3000";
+        // For web, use the stored redirectUri if available (for development),
+        // otherwise fall back to environment-based URL selection
+        let frontendUrl;
+        
+        if (req.session.redirectUri) {
+          frontendUrl = req.session.redirectUri;
+          console.log("Using custom redirect URI:", frontendUrl);
+        } else {
+          frontendUrl = process.env.NODE_ENV === "production" 
+            ? "https://cloudpatch-frontend.onrender.com" 
+            : "http://localhost:3000";
+          console.log("Using environment-based redirect:", frontendUrl);
+        }
         
         const queryParams = new URLSearchParams({
           token: user.githubToken,
@@ -341,7 +352,6 @@ app.get("/auth/github/callback",
     }
   }
 );
-
 // Token exchange for Electron apps
 app.post("/auth/token-exchange", async (req, res) => {
   try {
