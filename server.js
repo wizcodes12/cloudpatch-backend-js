@@ -122,23 +122,23 @@ const FRONTEND_URL = process.env.NODE_ENV === "production"
 
 // Middleware
 // Middleware
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:8000',
+  'https://cloudpatch-frontend.onrender.com',
+  'electron://app'
+];
+
 app.use(cors({
   origin: function(origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
     if(!origin) return callback(null, true);
     
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:8000',
-      'https://cloudpatch-frontend.onrender.com',
-      'electron://app'
-    ];
-    
     if(allowedOrigins.indexOf(origin) !== -1 || origin.includes('localhost')) {
       callback(null, true);
     } else {
       console.log('CORS blocked origin:', origin);
-      callback(null, true); // Temporarily allow all origins for debugging
+      callback(new Error('Not allowed by CORS'));  // Actually block disallowed origins
     }
   },
   credentials: true,
@@ -146,6 +146,13 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'User-Agent', 'Origin', 'X-Requested-With'],
   exposedHeaders: ['Authorization']
 }));
+
+// Add debug logging for all requests
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  console.log('Request headers:', req.headers);
+  next();
+});
 
 app.use(express.json());
 app.use(
