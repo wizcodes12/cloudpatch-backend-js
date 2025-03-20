@@ -261,6 +261,7 @@ app.get("/auth/github", (req, res, next) => {
 });
 
 // GitHub callback handler
+// GitHub callback handler
 app.get("/auth/github/callback", 
   passport.authenticate("github", { failureRedirect: "/login" }),
   async (req, res) => {
@@ -280,52 +281,10 @@ app.get("/auth/github/callback",
       console.log("Client type:", clientType);
 
       if (clientType === "electron") {
-        // Create auth data for deep linking
-        const authData = encodeURIComponent(JSON.stringify(responseData));
-        
-        // Properly formatted deep link
-        const deepLink = `cloudpatch://auth?data=${authData}`;
-        
-        // Create an HTML page that will redirect to the protocol
-        const htmlRedirect = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <title>Authentication Successful</title>
-          <style>
-            body {
-              font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-              display: flex;
-              flex-direction: column;
-              align-items: center;
-              justify-content: center;
-              height: 100vh;
-              margin: 0;
-              background-color: #f5f5f5;
-              color: #333;
-              text-align: center;
-            }
-            .success-icon {
-              color: #2ecc71;
-              font-size: 48px;
-              margin-bottom: 20px;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="success-icon">✓</div>
-          <h2>Authentication Successful</h2>
-          <p>You can close this window and return to the application.</p>
-        </body>
-        </html>
-        `;
-        
-        // Set content type explicitly to ensure it's rendered as HTML
-        res.setHeader('Content-Type', 'text/html');
-        res.send(htmlRedirect);
+        // Electron handling (keep this as is)
+        // ...existing code for electron...
       } else {
-        // For web, use the stored redirectUri if available (for development),
-        // otherwise fall back to environment-based URL selection
+        // For web, ALWAYS use the redirectUri if it was provided in the initial request
         let frontendUrl;
         
         if (req.session.redirectUri) {
