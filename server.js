@@ -121,11 +121,29 @@ const FRONTEND_URL = process.env.NODE_ENV === "production"
   : ['http://localhost:3000', 'http://localhost:8000', 'electron://app'];
 
 // Middleware
+// Middleware
 app.use(cors({
-  origin: [...FRONTEND_URL, '*'],
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if(!origin) return callback(null, true);
+    
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:8000',
+      'https://cloudpatch-frontend.onrender.com',
+      'electron://app'
+    ];
+    
+    if(allowedOrigins.indexOf(origin) !== -1 || origin.includes('localhost')) {
+      callback(null, true);
+    } else {
+      console.log('CORS blocked origin:', origin);
+      callback(null, true); // Temporarily allow all origins for debugging
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'User-Agent'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'User-Agent', 'Origin', 'X-Requested-With'],
   exposedHeaders: ['Authorization']
 }));
 
