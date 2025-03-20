@@ -122,6 +122,7 @@ const FRONTEND_URL = process.env.NODE_ENV === "production"
 
 // Middleware
 // Middleware
+// CORS configuration
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:8000',
@@ -129,6 +130,43 @@ const allowedOrigins = [
   'electron://app'
 ];
 
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  
+  // Log incoming requests for debugging
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  console.log('Request origin:', origin);
+  console.log('Request headers:', req.headers);
+  
+  // Set CORS headers for preflight requests
+  // Needed for browser support
+  if (req.method === 'OPTIONS') {
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, User-Agent, Origin, X-Requested-With');
+    res.header('Access-Control-Max-Age', '86400'); // 24 hours
+    res.header('Access-Control-Allow-Credentials', 'true');
+    
+    // Check and set allowed origin
+    if (origin && (allowedOrigins.includes(origin) || origin.includes('localhost'))) {
+      res.header('Access-Control-Allow-Origin', origin);
+    }
+    
+    return res.status(204).end();
+  }
+  
+  // For non-OPTIONS requests
+  if (origin && (allowedOrigins.includes(origin) || origin.includes('localhost'))) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, User-Agent, Origin, X-Requested-With');
+    res.header('Access-Control-Expose-Headers', 'Authorization, Content-Disposition');
+  }
+  
+  next();
+});
+
+// Then use cors middleware with the same settings
 app.use(cors({
   origin: function(origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
@@ -138,13 +176,13 @@ app.use(cors({
       callback(null, true);
     } else {
       console.log('CORS blocked origin:', origin);
-      callback(new Error('Not allowed by CORS'));  // Actually block disallowed origins
+      callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'User-Agent', 'Origin', 'X-Requested-With'],
-  exposedHeaders: ['Authorization']
+  exposedHeaders: ['Authorization', 'Content-Disposition']
 }));
 
 // Add debug logging for all requests
