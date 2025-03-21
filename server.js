@@ -1,730 +1,822 @@
-require("dotenv").config();
-const express = require("express");
-const mongoose = require("mongoose");
-const crypto = require('crypto');
-const session = require("express-session");
-const passport = require("passport");
-const GitHubStrategy = require("passport-github2").Strategy;
-const cors = require("cors");
-const { Octokit } = require("@octokit/rest");
-const cookieParser = require('cookie-parser');
-const app = express();
-const PORT = process.env.PORT || 5000;
+import React, { useState, useRef, useEffect } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { Search, Loader, AlertTriangle, Check, Code, Download, X, Server, ArrowLeft } from 'lucide-react';
+import '../styles/ManualCheck.css';
+import authService from "../services/authService";
 
-// MongoDB Connection URI
-const MONGO_URI = process.env.MONGO_URI;
+// Import ManualCheckLoader component
+import ManualCheckLoader from './ManualCheckLoader';
 
-// Add before other middleware
-app.use(cookieParser());
+const ManualCheck = ({ user, setUser, API_BASE_URL, showNotification }) => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [hostingType, setHostingType] = useState(null); // Will be set from location state
+  const [apiUrl, setApiUrl] = useState("");
+  const [protocol, setProtocol] = useState("http");
+  const [method, setMethod] = useState("GET");
+  const [port, setPort] = useState("3000");
+  const [loading, setLoading] = useState(false);
+  const [scanResults, setScanResults] = useState(null);
+  const [applyingFix, setApplyingFix] = useState(false);
+  const [generatingPDF, setGeneratingPDF] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [promptMessage, setPromptMessage] = useState("");
+  const [promptType, setPromptType] = useState(""); // 'success' or 'error'
+  const [showPopupBlocked, setShowPopupBlocked] = useState(false);
+  const [showLoader, setShowLoader] = useState(false);
+  const [loaderType, setLoaderType] = useState('scanning');
 
-// Connect to MongoDB with error handling
-mongoose
-  .connect(MONGO_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-    dbName: "cloudpatch" 
-  })
-  .then(() => console.log("MongoDB connected to cloudpatch database"))
-  .catch((err) => {
-    console.error("MongoDB connection error:", err);
-    process.exit(1);
-  });
+  const resultsRef = useRef(null);
 
-// User model with timestamps
-const userSchema = new mongoose.Schema({
-  githubId: {
-    type: String,
-    required: true,
-    unique: true
-  },
-  username: {
-    type: String,
-    required: true
-  },
-  githubToken: String,
-  avatar: String,
-  email: String,
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
-  lastLogin: {
-    type: Date,
-    default: Date.now
-  }
-});
+  // Set hosting type from location state on component mount
+  useEffect(() => {
+    if (location.state && location.state.hostingType) {
+      setHostingType(location.state.hostingType);
+    } else {
+      // Redirect back to choose page if no hosting type specified
+      navigate('/choose');
+    }
+  }, [location, navigate]);
 
-const User = mongoose.model("User", userSchema);
-
-// GitHub auth configuration
-const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
-const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
-// Update the callback URL to use the deployed URL
-const GITHUB_CALLBACK_URL = process.env.NODE_ENV === "production" 
-  ? "https://cloudpatch-backend-js.onrender.com/auth/github/callback"
-  : "http://localhost:5000/auth/github/callback";
-
-// Passport config
-passport.use(
-  new GitHubStrategy(
-    {
-      clientID: GITHUB_CLIENT_ID,
-      clientSecret: GITHUB_CLIENT_SECRET,
-      callbackURL: GITHUB_CALLBACK_URL,
-    },
-    async (accessToken, refreshToken, profile, done) => {
-      try {
-        let user = await User.findOne({ githubId: profile.id });
-        
-        if (user) {
-          // Update token and last login
-          user.githubToken = accessToken;
-          user.lastLogin = new Date();
-          await user.save();
-          return done(null, user);
+  // Process tokens from URL parameters (e.g., after GitHub OAuth redirect)
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const token = urlParams.get('token');
+    
+    if (token) {
+      // Store token in multiple locations for redundancy
+      localStorage.setItem("github_token", token);
+      sessionStorage.setItem("github_token", token);
+      
+      // Clean up URL after processing
+      const cleanUrl = window.location.pathname + 
+                      (window.location.search.replace(/[?&]token=[^&]+/, '').replace(/^\?$/, ''));
+      window.history.replaceState({}, document.title, cleanUrl);
+      
+      // If there's user data in the URL as well
+      const userData = urlParams.get('user_data');
+      if (userData) {
+        try {
+          const parsedUserData = JSON.parse(decodeURIComponent(userData));
+          // Only use setUser if it's available as a prop
+          if (typeof setUser === 'function') {
+            setUser(parsedUserData);
+          }
+        } catch (e) {
+          console.error("Failed to parse user data from URL", e);
         }
-
-        // Create new user with token
-        user = await new User({
-          githubId: profile.id,
-          username: profile.username,
-          githubToken: accessToken,
-          avatar: profile.photos?.[0]?.value,
-          email: profile._json.email
-        }).save();
-
-        done(null, user);
-      } catch (err) {
-        console.error("Error in GitHub strategy:", err);
-        done(err, null);
+      }
+      
+      // Show success notification if available
+      if (typeof showNotification === 'function') {
+        showNotification("Successfully authenticated with GitHub", "success");
       }
     }
-  )
-);
+  }, [showNotification, setUser]); // Add dependencies
 
-passport.serializeUser((user, done) => {
-  done(null, user.id);
-});
+  const validateApiUrl = (url) => {
+    if (hostingType === 'cloud') {
+      try {
+        const parsedUrl = new URL(url);
+        return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    }
+    // For local endpoints, just check if there's any content
+    return !!url.trim();
+  };
 
-passport.deserializeUser(async (id, done) => {
-  try {
-    const user = await User.findById(id);
-    done(null, user);
-  } catch (err) {
-    done(err, null);
-  }
-});
+  const scrollToResults = () => {
+    if (resultsRef.current) {
+      resultsRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+    setShowPrompt(false);
+  };
 
-// Update CORS configuration for production
-const FRONTEND_URL = process.env.NODE_ENV === "production" 
-  ? ["https://cloudpatch-frontend.onrender.com", "electron://app"]
-  : ['http://localhost:3000', 'http://localhost:8000', 'electron://app'];
+  const displayPrompt = (message, type, autoHide = true) => {
+    setPromptMessage(message);
+    setPromptType(type);
+    setShowPrompt(true);
 
-// Middleware
-// Middleware
-// CORS configuration
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:8000',
-  'https://cloudpatch-frontend.onrender.com',
-  'electron://app'
-];
+    if (autoHide) {
+      setTimeout(() => {
+        setShowPrompt(false);
+      }, 3000);
+    }
+  };
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  
-  // Log incoming requests for debugging
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
-  console.log('Request origin:', origin);
-  console.log('Request headers:', req.headers);
-  
-  // Set CORS headers for preflight requests
-  // Needed for browser support
-  if (req.method === 'OPTIONS') {
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, User-Agent, Origin, X-Requested-With');
-    res.header('Access-Control-Max-Age', '86400'); // 24 hours
-    res.header('Access-Control-Allow-Credentials', 'true');
-    
-    // Check and set allowed origin
-    if (origin && (allowedOrigins.includes(origin) || origin.includes('localhost'))) {
-      res.header('Access-Control-Allow-Origin', origin);
+  // Helper function to get GitHub token from various sources
+  const getGitHubToken = () => {
+    // Try each source in sequence until we find a valid token
+    // 1. First check user object
+    if (user && user.token) {
+      return user.token;
     }
     
-    return res.status(204).end();
-  }
-  
-  // For non-OPTIONS requests
-  if (origin && (allowedOrigins.includes(origin) || origin.includes('localhost'))) {
-    res.header('Access-Control-Allow-Origin', origin);
-    res.header('Access-Control-Allow-Credentials', 'true');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, User-Agent, Origin, X-Requested-With');
-    res.header('Access-Control-Expose-Headers', 'Authorization, Content-Disposition');
-  }
-  
-  next();
-});
-
-// Then use cors middleware with the same settings
-app.use(cors({
-  origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if(!origin) return callback(null, true);
-    
-    if(allowedOrigins.indexOf(origin) !== -1 || origin.includes('localhost')) {
-      callback(null, true);
-    } else {
-      console.log('CORS blocked origin:', origin);
-      callback(new Error('Not allowed by CORS'));
+    // 2. Try localStorage
+    const localToken = localStorage.getItem("github_token");
+    if (localToken) {
+      return localToken;
     }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'User-Agent', 'Origin', 'X-Requested-With'],
-  exposedHeaders: ['Authorization', 'Content-Disposition']
-}));
-
-// Add debug logging for all requests
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
-  console.log('Request headers:', req.headers);
-  next();
-});
-
-app.use(express.json());
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || crypto.randomBytes(64).toString('hex'),
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: process.env.NODE_ENV === "production",
-      httpOnly: true,
-      sameSite: process.env.NODE_ENV === "production" ? 'none' : 'lax',
-      maxAge: 24 * 60 * 60 * 1000
-    }
-  })
-);
-
-app.use(passport.initialize());
-app.use(passport.session());
-
-// Auth middleware
-const isAuthenticated = (req, res, next) => {
-  if (req.isAuthenticated()) {
-    return next();
-  }
-  res.status(401).json({ error: "Not authenticated" });
-};
-
-// Status endpoint
-app.get("/api/status", (req, res) => {
-  res.json({ status: "online" });
-});
-
-// Network check endpoint
-app.get("/api/network-test", async (req, res) => {
-  try {
-    const results = {
-      github: false,
-      internet: false
-    };
     
-    // Test GitHub API connectivity
+    // 3. Try sessionStorage
+    const sessionToken = sessionStorage.getItem("github_token");
+    if (sessionToken) {
+      return sessionToken;
+    }
+    
+    return null;
+  };
+
+  const handleBackToChoose = () => {
+    navigate('/choose');
+  };
+
+  const handleAllowPopups = () => {
+    setShowPopupBlocked(false);
+    // Try to open a test popup to ensure they're allowed
+    const testPopup = window.open('about:blank', '_blank', 'width=100,height=100');
+    if (testPopup) {
+      testPopup.close();
+      // Continue with the fix after popups are allowed
+      if (applyingFix) {
+        handleAutoFix(lastErrorAttempted, lastSolutionAttempted);
+      }
+    }
+  };
+
+  const closeLoader = () => {
+    setShowLoader(false);
+  };
+
+  // Store the last error/solution attempted for retry after popup blocked
+  let lastErrorAttempted = null;
+  let lastSolutionAttempted = null;
+
+  const checkApi = async () => {
+    if (!apiUrl) {
+      displayPrompt("Please enter an API URL or endpoint", "error");
+      return;
+    }
+  
+    if (!validateApiUrl(apiUrl)) {
+      displayPrompt(hostingType === 'cloud' ? "Please enter a valid full URL" : "Please enter a valid endpoint", "error");
+      return;
+    }
+  
     try {
-      const githubResponse = await fetch("https://api.github.com", {
-        timeout: 5000,
-        headers: { "User-Agent": "Network Test" }
+      setLoading(true);
+      setShowLoader(true);
+      setLoaderType('scanning');
+      
+      const token = authService.getGitHubToken(); // Use authService consistently
+      
+      // Prepare the API endpoint and query parameters
+      let fullUrl = '';
+      let requestUrl = '';
+      
+      if (hostingType === 'local') {
+        // Clean the path of leading slashes, regardless of whether it contains "api" or not
+        const cleanPath = apiUrl.replace(/^\/+/, '');
+        fullUrl = `${protocol}://localhost:${port}/${cleanPath}`;
+        requestUrl = `${API_BASE_URL}/check-api?api_url=${encodeURIComponent(cleanPath)}&method=${method}&port=${port}`;
+      } else {
+        // For cloud hosting, send the full URL
+        fullUrl = apiUrl;
+        requestUrl = `${API_BASE_URL}/check-api?api_url=${encodeURIComponent(fullUrl)}&method=${method}`;
+      }
+  
+      console.log("Sending request to:", requestUrl);
+      
+      const checkResponse = await fetch(
+        requestUrl,
+        {
+          method: 'GET',
+          headers: {
+            "Authorization": token ? `Bearer ${token}` : '',
+            "Content-Type": "application/json",
+            "Origin": window.location.origin // Add explicit Origin header
+          },
+          credentials: 'include', // Ensure cookies are sent
+          mode: 'cors' // Explicitly request CORS mode
+        }
+      );
+  
+      if (!checkResponse.ok) {
+        const errorText = await checkResponse.text();
+        console.error("API response error:", errorText);
+        throw new Error(`Error checking API: ${checkResponse.status} ${checkResponse.statusText} - ${errorText}`);
+      }
+      
+      const apiCheckData = await checkResponse.json();
+      console.log("API check response:", apiCheckData);
+      
+      // Check if the response indicates the server isn't running locally
+      const isLocalServerError = 
+        apiCheckData.error && 
+        (apiCheckData.error.includes("Local server not running") || 
+         apiCheckData.error.includes("Local API unreachable"));
+      
+      // Updated error detection logic
+      const hasErrors = 
+        apiCheckData.error || 
+        apiCheckData.status === "error" ||
+        (apiCheckData.scan_results?.errors_detected && 
+         apiCheckData.scan_results.errors_detected.length > 0);
+      
+      // Process and prepare scan results
+      setScanResults({
+        ...apiCheckData,
+        api_url: fullUrl,
+        scan_results: {
+          apis_found: [fullUrl],
+          errors_detected: apiCheckData.error ? [{error: apiCheckData.error}] : 
+                          (apiCheckData.scan_results?.errors_detected || []),
+          solutions: apiCheckData.solution ? [{solution: apiCheckData.solution}] : 
+                    (apiCheckData.scan_results?.solutions || [])
+        },
+        // Add a flag that directly indicates if this is a local server error
+        is_local_server_error: isLocalServerError,
+        // Keep track of whether this was a local endpoint check
+        is_local: hostingType === 'local'
       });
-      results.github = githubResponse.ok;
+  
+      const errorCount = apiCheckData.error ? 1 : 
+                        (apiCheckData.scan_results?.errors_detected?.length || 0);
+  
+      if (isLocalServerError) {
+        // Special handling for local server errors
+        displayPrompt(
+          "Local server is not running. Please start your local server first.",
+          "error",
+          false // Don't auto-hide
+        );
+      } else if (hasErrors) {
+        displayPrompt(
+          `${errorCount} issue${errorCount !== 1 ? 's' : ''} found with your API`,
+          "error",
+          false // Don't auto-hide
+        );
+      } else {
+        displayPrompt("API check completed successfully", "success");
+      }
     } catch (error) {
-      console.error("GitHub connectivity test failed:", error.message);
-    }
-    
-    // Test general internet connectivity
-    try {
-      const internetResponse = await fetch("https://www.google.com", {
-        timeout: 5000,
-        headers: { "User-Agent": "Network Test" }
+      console.error("API check error:", error);
+      displayPrompt(error.message || "Failed to check API", "error");
+      setScanResults({
+        error: error.message || "Failed to check API",
+        status: "error",
+        api_url: hostingType === 'local' ? `${protocol}://localhost:${port}/${apiUrl.replace(/^\/+/, '')}` : apiUrl,
+        scan_results: {
+          apis_found: [hostingType === 'local' ? `${protocol}://localhost:${port}/${apiUrl.replace(/^\/+/, '')}` : apiUrl],
+          errors_detected: [{error: error.message || "Failed to check API"}],
+          solutions: []
+        },
+        is_local: hostingType === 'local'
       });
-      results.internet = internetResponse.ok;
-    } catch (error) {
-      console.error("Internet connectivity test failed:", error.message);
+    } finally {
+      setLoading(false);
+      setShowLoader(false);
     }
-    
-    res.json(results);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-// On your backend server
-app.post('/create-github-issue', async (req, res) => {
+  };
+
+  // Auto-fix function
+  // Auto-fix function
+const handleAutoFix = async (error, solution) => {
+  // Store the error and solution for potential retry
+  lastErrorAttempted = error;
+  lastSolutionAttempted = solution;
+  
   try {
-    const { title, body, returnUrl } = req.body;
-    const token = req.headers.authorization?.replace('Bearer ', '');
+    setApplyingFix(true);
+    setShowLoader(true);
+    setLoaderType('applying-fix');
     
+    // Get the GitHub token directly from AuthService
+    const token = authService.getGitHubToken();
     if (!token) {
-      return res.status(401).json({ error: 'Authentication required' });
+      displayPrompt("GitHub token not found. Please log in again.", "error");
+      
+      // Direct to login page using authService
+      authService.redirectToLogin(window.location.href, 'web');
+      return;
     }
     
-    // Store the issue data in a temporary session or database
-    // Use a unique ID to reference it instead of passing all data in URL
-    const sessionId = generateUniqueId();
-    await storeTemporaryIssueData(sessionId, { token, title, body, returnUrl });
+    console.log("Using token for auto-fix:", token.substring(0, 5) + "...");
     
-    // Return a redirect URL with just the session ID
-    res.json({
-      redirect_url: `${process.env.BASE_URL}/github-issue-creator-secure?session=${sessionId}`
+    // Call your server's /apply-fix endpoint to get the DeepSeek solution
+    const response = await fetch(`${API_BASE_URL}/apply-fix`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "Origin": window.location.origin
+      },
+      body: JSON.stringify({
+        api_url: apiUrl,
+        fix_content: error.error
+      }),
+      credentials: 'include',
+      mode: 'cors'
     });
-  } catch (error) {
-    console.error('Error creating issue:', error);
-    res.status(500).json({ error: 'Failed to prepare issue creation' });
-  }
-});
-
-// Then create a new endpoint that handles the actual GitHub issue creation
-app.get('/github-issue-creator-secure', async (req, res) => {
-  try {
-    const { session } = req.query;
-    if (!session) {
-      return res.status(400).send('Missing session ID');
+    
+    if (!response.ok) {
+      let errorData;
+      try {
+        errorData = await response.json();
+      } catch (e) {
+        // If JSON parsing fails, get the response as text
+        const text = await response.text();
+        errorData = { detail: text };
+      }
+      
+      console.error("Apply fix error response:", errorData);
+      throw new Error(`Failed to prepare fix: ${typeof errorData === 'object' ? JSON.stringify(errorData) : errorData}`);
     }
     
-    // Retrieve the stored issue data using the session ID
-    const issueData = await getTemporaryIssueData(session);
-    if (!issueData) {
-      return res.status(404).send('Session not found or expired');
-    }
+    const result = await response.json();
+    console.log("Apply fix response:", result);
     
-    // Now use this data to render a page that will help create a GitHub issue
-    // This avoids exposing sensitive data in URLs
-    
-    // Render an HTML page that will handle GitHub repo selection and issue creation
-    res.send(`
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Create GitHub Issue</title>
-        <style>
-          /* Add your CSS here */
-        </style>
-      </head>
-      <body>
-        <h1>Create GitHub Issue</h1>
-        <div id="repo-selector">
-          <!-- JavaScript will populate this -->
-        </div>
+    if (result.status === "auth_required") {
+      // Open a new window for GitHub authentication
+      const width = 1000;
+      const height = 800;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+      
+      const popupWindow = window.open(
+        result.auth_url,
+        'github-auth',
+        `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,status=yes`
+      );
+      
+      if (!popupWindow) {
+        setShowPopupBlocked(true);
+        displayPrompt("Popup was blocked. Please allow popups for this site.", "error");
+        return;
+      }
+      
+      // Set up event listener for messages from the popup
+      const messageHandler = function(event) {
+        // Check if message is from our expected origin
+        const expectedOrigins = [
+          'http://localhost:3000',
+          'http://localhost:8000', 
+          'https://cloudpatch-frontend.onrender.com',
+          API_BASE_URL
+        ];
         
-        <script>
-          // Use session ID to fetch data securely from backend
-          const sessionId = "${session}";
+        if (!expectedOrigins.includes(event.origin) && !event.origin.includes('localhost')) {
+          console.warn(`Ignoring message from unexpected origin: ${event.origin}`);
+          return;
+        }
+        
+        if (event.data && event.data.type === 'auth_complete') {
+          // Handle successful authentication
+          console.log("Received auth_complete message", event.data);
           
-          // Initialize page with the session data
-          async function init() {
-            try {
-              // JavaScript that handles repo selection and issue creation
-              // This will use the token securely from the backend, not exposing it in frontend
-            } catch (error) {
-              console.error('Error:', error);
-            }
+          // Store the new token if provided
+          if (event.data.token) {
+            authService.storeGitHubToken(event.data.token, event.data.user);
           }
           
-          init();
-        </script>
-      </body>
-      </html>
-    `);
+          displayPrompt("Authentication successful! Please try applying the fix again.", "success");
+          checkApi(); // Refresh results
+        }
+      };
+      
+      window.addEventListener('message', messageHandler);
+      
+      // Clean up event listener when window closes
+      const checkPopupClosed = setInterval(() => {
+        if (popupWindow.closed) {
+          clearInterval(checkPopupClosed);
+          window.removeEventListener('message', messageHandler);
+        }
+      }, 1000);
+      
+      return;
+    }
+    
+    if (!result.solution) {
+      throw new Error("No solution was generated");
+    }
+    
+    // Create issue body with the solution
+    const issueBody = `## Error Detected\n${error.error}\n\n## Suggested Fix\n\`\`\`javascript\n${result.solution}\n\`\`\`\n\nGenerated by API Fixer tool`;
+    const issueTitle = `Fix for API issue: ${apiUrl}`;
+    
+    // Use a server-side endpoint to handle the GitHub issue creation window
+    const width = 1000;
+    const height = 800;
+    const left = window.screenX + (window.outerWidth - width) / 2;
+    const top = window.screenY + (window.outerHeight - height) / 2;
+    
+    // Use the github-issue-creator endpoint to open a new window
+    const creatorUrl = `${API_BASE_URL}/github-issue-creator?token=${encodeURIComponent(token)}&title=${encodeURIComponent(issueTitle)}&body=${encodeURIComponent(issueBody)}`;
+    
+    const popupWindow = window.open(
+      creatorUrl,
+      'github-issue-creator',
+      `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,status=yes`
+    );
+    
+    if (!popupWindow) {
+      setShowPopupBlocked(true);
+      displayPrompt("Popup was blocked. Please allow popups for this site.", "error");
+      return;
+    }
+    
+    // Set up event listener for messages from the popup
+    const messageHandler = function(event) {
+      // Check if message is from our expected origin
+      const expectedOrigins = [
+        'http://localhost:3000',
+        'http://localhost:8000', 
+        'https://cloudpatch-frontend.onrender.com',
+        API_BASE_URL
+      ];
+      
+      if (!expectedOrigins.includes(event.origin) && !event.origin.includes('localhost')) {
+        console.warn(`Ignoring message from unexpected origin: ${event.origin}`);
+        return;
+      }
+      
+      if (event.data && event.data.type === 'issue-created') {
+        displayPrompt(`Issue #${event.data.issueNumber} created successfully!`, "success");
+        checkApi(); // Refresh results
+      }
+    };
+    
+    window.addEventListener('message', messageHandler);
+    
+    // Clean up event listener when window closes
+    const checkPopupClosed = setInterval(() => {
+      if (popupWindow.closed) {
+        clearInterval(checkPopupClosed);
+        window.removeEventListener('message', messageHandler);
+      }
+    }, 1000);
+    
+    displayPrompt("GitHub repository selector opened in new window", "success");
   } catch (error) {
-    console.error('Error serving issue creator page:', error);
-    res.status(500).send('An error occurred');
+    console.error("Auto-fix error:", error);
+    displayPrompt(error.message || "Failed to apply fix", "error");
+  } finally {
+    setApplyingFix(false);
+    setShowLoader(false);
   }
-});
-// Auth routes for Electron
-app.get("/auth/github-electron", (req, res) => {
-  // Generate a unique state parameter
-  const state = crypto.randomBytes(16).toString('hex');
- 
-  // Store state in a cookie that the client can send back
-  res.cookie('github_auth_state', state, {
-    httpOnly: true,
-    maxAge: 10 * 60 * 1000, // 10 minutes expiry
-    sameSite: process.env.NODE_ENV === "production" ? 'none' : 'lax',
-    secure: process.env.NODE_ENV === "production"
-  });
- 
-  // Add a more specific redirect_uri for electron clients
-  const authUrl = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&scope=user:email,repo&state=${state}&redirect_uri=${GITHUB_CALLBACK_URL}`;
- 
-  // Return CORS headers for Electron
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
-  
-  // Respond with the auth URL and state (so Electron can store it locally)
-  res.json({
-    authUrl: authUrl,
-    state: state
-  });
-});
+};
 
-// Standard GitHub auth flow
-app.get("/auth/github", (req, res, next) => {
-  // Store the client type and return URL
-  req.session.clientType = req.query.client || "web";
-  req.session.returnTo = req.query.returnTo || "/";
-  // Store the redirectUri if provided (for development mode)
-  req.session.redirectUri = req.query.redirectUri || null;
-
-  // Generate state parameter for security
-  const state = crypto.randomBytes(16).toString("hex");
-  req.session.authState = state;
-
-  // Pass the state parameter to GitHub
-  passport.authenticate("github", {
-    scope: ["user:email", "repo"],
-    state: state,
-  })(req, res, next);
-});
-
-// GitHub callback handler
-// GitHub callback handler
-app.get("/auth/github/callback", 
-  passport.authenticate("github", { failureRedirect: "/login" }),
-  async (req, res) => {
+  const handleDownloadPDF = async (error, solution, apiDetails) => {
     try {
-      const user = req.user;
-      const responseData = {
-        token: user.githubToken,
-        user: {
-          id: user.githubId,
-          username: user.username,
-          avatar: user.avatar
+      setGeneratingPDF(true);
+      setShowLoader(true);
+      setLoaderType('generating-pdf');
+      
+      const token = getGitHubToken();
+      
+      const reportData = {
+        timestamp: new Date().toISOString(),
+        api_url: apiDetails.api_url,
+        platform: apiDetails.platform || 'Unknown',
+        error: {
+          type: 'API Error',
+          message: error.error || 'Unknown error',
+          severity: 'HIGH',
+          timestamp: new Date().toISOString()
+        },
+        solution: {
+          description: solution?.solution || 'No solution available',
+          suggested_fixes: []
+        },
+        additional_context: {
+          environment: apiDetails.environment || 'Production',
+          performance_metrics: apiDetails.performance_metrics || {},
+          status_code: apiDetails.status_code || 500
         }
       };
 
-      // Check if this is an Electron client
-      const clientType = req.session.clientType || req.query.client || "web";
-      console.log("Client type:", clientType);
-
-      if (clientType === "electron") {
-        // Electron handling (keep this as is)
-        // ...existing code for electron...
-      } else {
-        // For web, ALWAYS use the redirectUri if it was provided in the initial request
-        let frontendUrl;
-        
-        if (req.session.redirectUri) {
-          frontendUrl = req.session.redirectUri;
-          console.log("Using custom redirect URI:", frontendUrl);
-        } else {
-          frontendUrl = process.env.NODE_ENV === "production" 
-            ? "https://cloudpatch-frontend.onrender.com" 
-            : "http://localhost:3000";
-          console.log("Using environment-based redirect:", frontendUrl);
-        }
-        
-        const queryParams = new URLSearchParams({
-          token: user.githubToken,
-          userData: JSON.stringify(responseData.user),
-          returnTo: req.session.returnTo || "/",
-        }).toString();
-
-        return res.redirect(`${frontendUrl}?${queryParams}`);
+      if (!reportData.api_url || !reportData.error.message) {
+        throw new Error('Missing required data for PDF generation');
       }
+
+      const response = await fetch(`${API_BASE_URL}/api/generate-pdf-report`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(reportData)
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail?.message || 'Failed to generate PDF report');
+      }
+
+      const contentDisposition = response.headers.get('Content-Disposition');
+      const filename = contentDisposition
+        ? contentDisposition.split('filename=')[1].replace(/"/g, '')
+        : `api-error-report-${new Date().toISOString()}.pdf`;
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      
+      displayPrompt("Report downloaded successfully!", "success");
     } catch (error) {
-      console.error("Callback error:", error);
-      res.status(500).send(`Authentication Error: ${error.message}`);
+      console.error('Error downloading PDF:', error);
+      displayPrompt(error.message || "Failed to generate PDF report", "error");
+    } finally {
+      setGeneratingPDF(false);
+      setShowLoader(false);
     }
+  };
+
+  const renderLocalServerError = () => (
+    <div className="local-server-error">
+      <div className="error-icon-container">
+        <Server className="icon server-error-icon" />
+        <AlertTriangle className="icon overlay-error-icon" />
+      </div>
+      <h3>Local Server Not Running</h3>
+      <p>
+        We couldn't connect to your local server at <strong>localhost:{port}</strong>. 
+        Please make sure your server is running before checking the API.
+      </p>
+      <div className="server-error-tips">
+        <h4>Troubleshooting Tips:</h4>
+        <ul>
+          <li>Check if your server is running with the correct command (e.g., <code>npm start</code> or <code>npm run dev</code>)</li>
+          <li>Verify that your server is using port {port} (check your server configuration)</li>
+          <li>Make sure no firewall is blocking connections to port {port}</li>
+          <li>Try restarting your development server</li>
+        </ul>
+      </div>
+      <button className="retry-button" onClick={checkApi}>
+        <Search className="icon" />
+        <span>Retry Scan</span>
+      </button>
+    </div>
+  );
+
+  const DownloadButton = ({ error, solution, isLoading, apiDetails }) => (
+    <button
+      onClick={() => handleDownloadPDF(error, solution, apiDetails)}
+      disabled={isLoading}
+      className="download-button"
+    >
+      <span className="button-text">
+        {isLoading ? 'Generating Report...' : 'Download Report'}
+      </span>
+      {isLoading ? (
+        <Loader className="icon-spin" />
+      ) : (
+        <Download className="icon" />
+      )}
+    </button>
+  );
+
+  // If hosting type not yet set, show loading
+  if (hostingType === null) {
+    return (
+      <div className="manual-check loading-state">
+        <Loader className="icon-spin" size={48} />
+        <p>Loading...</p>
+      </div>
+    );
   }
-);
-// Token exchange for Electron apps
-app.post("/auth/token-exchange", async (req, res) => {
-  try {
-    const { code, state } = req.body;
-    
-    console.log("Token exchange attempt with:", {
-      codeProvided: !!code,
-      stateProvided: !!state,
-      userAgent: req.headers['user-agent']
-    });
-    
-    if (!code) {
-      return res.status(400).json({ error: "Authorization code is required" });
-    }
-    
-    // Exchange the code for an access token
-    console.log("Making GitHub token request with code:", 
-      code ? code.substring(0, 4) + "..." : "missing");
-    
-    // Use node-fetch explicitly with proper error handling
-    const https = require('https');
-    const agent = new https.Agent({
-      rejectUnauthorized: true,
-      timeout: 60000
-    });
-    
-    try {
-      // First attempt to get the token
-      const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
-        method: "POST",
-        headers: {
-          "Accept": "application/json",
-          "Content-Type": "application/json",
-          "User-Agent": "Electron GitHub OAuth Client"
-        },
-        body: JSON.stringify({
-          client_id: GITHUB_CLIENT_ID,
-          client_secret: GITHUB_CLIENT_SECRET,
-          code: code,
-          redirect_uri: GITHUB_CALLBACK_URL
-        }),
-        agent: agent,
-        timeout: 30000 // 30 second timeout
-      });
-      
-      // Handle non-200 responses
-      if (!tokenResponse.ok) {
-        const errorText = await tokenResponse.text();
-        console.error("GitHub token error:", tokenResponse.status, errorText);
-        return res.status(tokenResponse.status).json({ 
-          error: `GitHub returned ${tokenResponse.status}`,
-          details: errorText
-        });
-      }
-      
-      // Check for content type to handle non-JSON responses
-      const contentType = tokenResponse.headers.get("content-type");
-      let tokenData;
-      
-      if (contentType && contentType.includes("application/json")) {
-        tokenData = await tokenResponse.json();
-      } else {
-        const textResponse = await tokenResponse.text();
-        console.log("Non-JSON response from GitHub:", textResponse);
-        
-        // Try to parse URL-encoded response
-        try {
-          const params = new URLSearchParams(textResponse);
-          tokenData = {
-            access_token: params.get("access_token"),
-            token_type: params.get("token_type"),
-            scope: params.get("scope")
-          };
-        } catch (parseErr) {
-          console.error("Failed to parse response:", parseErr);
-          return res.status(500).json({ 
-            error: "Invalid response format from GitHub",
-            rawResponse: textResponse.substring(0, 100) // Include part of the response for debugging
-          });
-        }
-      }
-      
-      if (!tokenData || !tokenData.access_token) {
-        return res.status(400).json({ 
-          error: "Failed to get access token",
-          response: tokenData
-        });
-      }
-      
-      // Get user data from GitHub
-      const userResponse = await fetch("https://api.github.com/user", {
-        headers: {
-          "Authorization": `Bearer ${tokenData.access_token}`,
-          "User-Agent": "Electron GitHub OAuth Client",
-          "Accept": "application/vnd.github.v3+json"
-        },
-        agent: agent,
-        timeout: 30000
-      });
-      
-      if (!userResponse.ok) {
-        const errorText = await userResponse.text();
-        console.error("GitHub user API error:", userResponse.status, errorText);
-        return res.status(userResponse.status).json({ 
-          error: `GitHub API error: ${userResponse.status}`,
-          details: errorText
-        });
-      }
-      
-      const userData = await userResponse.json();
-      
-      if (!userData || !userData.id) {
-        return res.status(500).json({ error: "Invalid user data received from GitHub" });
-      }
-      
-      // Save or update user in the database
-      let user = await User.findOne({ githubId: userData.id.toString() });
-      
-      if (user) {
-        user.githubToken = tokenData.access_token;
-        user.lastLogin = new Date();
-        await user.save();
-      } else {
-        user = await new User({
-          githubId: userData.id.toString(),
-          username: userData.login,
-          githubToken: tokenData.access_token,
-          avatar: userData.avatar_url,
-          email: userData.email
-        }).save();
-      }
-      
-      // Return the auth data
-      return res.json({
-        token: tokenData.access_token,
-        user: {
-          id: userData.id,
-          username: userData.login,
-          avatar: userData.avatar_url
-        }
-      });
-    } catch (fetchError) {
-      // Detailed error reporting
-      console.error("Fetch error details:", {
-        name: fetchError.name,
-        message: fetchError.message,
-        stack: fetchError.stack
-      });
-      
-      if (fetchError.code === 'ECONNRESET' || fetchError.code === 'ETIMEDOUT') {
-        return res.status(504).json({ 
-          error: "Connection to GitHub timed out. Please check your network and try again.",
-          errorCode: fetchError.code
-        });
-      }
-      
-      return res.status(500).json({ 
-        error: "Failed to connect to GitHub", 
-        message: fetchError.message,
-        code: fetchError.code || 'unknown'
-      });
-    }
-  } catch (error) {
-    console.error("Token exchange error:", error);
-    res.status(500).json({ 
-      error: "Token exchange failed", 
-      message: error.message,
-      stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
-    });
-  }
-});
 
-// Token validation endpoint
-app.get("/api/validate-token", async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader && authHeader.startsWith('Bearer ') 
-      ? authHeader.substring(7) 
-      : null;
-    
-    if (!token) {
-      console.log("Missing token in validation request");
-      return res.status(401).json({ 
-        valid: false, 
-        message: "No token provided" 
-      });
-    }
-    
-    console.log(`Validating token: ${token.substring(0, 5)}...`);
-    
-    // Check if token exists in the database
-    const user = await User.findOne({ githubToken: token });
-    
-    if (!user) {
-      console.log("Token not found in database");
-      return res.status(401).json({ 
-        valid: false, 
-        message: "Token not found in database" 
-      });
-    }
-    
-    // Verify with GitHub that the token is still valid
-    try {
-      const octokit = new Octokit({ auth: token });
-      const githubUser = await octokit.users.getAuthenticated();
+  // Render main API check interface
+  return (
+    <div className="manual-check">
+      {showPrompt && (
+        <div className={`notification-prompt ${promptType}`}>
+          <div className="prompt-content">
+            <span className="prompt-message">
+              {promptType === "error" ? <AlertTriangle className="prompt-icon" /> : <Check className="prompt-icon" />}
+              {promptMessage}
+            </span>
+            <div className="prompt-actions">
+              {promptType === "error" && scanResults && (
+                <button className="show-button" onClick={scrollToResults}>
+                  Show
+                </button>
+              )}
+              <button className="cancel-button" onClick={() => setShowPrompt(false)}>
+                <X className="cancel-icon" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       
-      console.log(`Token validated for user: ${githubUser.data.login}`);
-      
-      // Return user data with token validation
-      return res.json({
-        valid: true,
-        user: {
-          id: user.githubId,
-          username: user.username,
-          avatar: user.avatar
-        }
-      });
-    } catch (githubError) {
-      console.error("GitHub validation error:", githubError.message);
-      return res.status(401).json({ 
-        valid: false, 
-        message: "GitHub API rejected the token",
-        error: githubError.message
-      });
-    }
-  } catch (error) {
-    console.error("Token validation error:", error);
-    res.status(500).json({
-      valid: false,
-      message: "Server error during token validation",
-      error: error.message
-    });
-  }
-});
+      {/* ManualCheckLoader overlay */}
+      {showLoader && (
+        <ManualCheckLoader 
+          type={loaderType}
+          onClose={closeLoader}
+          showPopupBlocked={showPopupBlocked}
+          onAllowPopups={handleAllowPopups}
+        />
+      )}
 
-// User API routes
-app.get("/api/current_user", (req, res) => {
-  if (req.isAuthenticated()) {
-    const user = req.user;
-    res.json({
-      id: user.githubId,
-      username: user.username,
-      avatar: user.avatar,
-      token: user.githubToken
-    });
-  } else {
-    res.status(401).json({ error: "Not authenticated" });
-  }
-});
+      <div className="check-container">
+        {/* <div className="back-link">
+          <button className="back-button" onClick={handleBackToChoose}>
+            <ArrowLeft className="icon" />
+            <span>Back to Selection</span>
+          </button>
+        </div> */}
 
-app.get("/api/logout", (req, res) => {
-  req.logout((err) => {
-    if (err) {
-      return res.status(500).json({ error: "Logout failed" });
-    }
-    req.session.destroy((destroyErr) => {
-      if (destroyErr) {
-        return res.status(500).json({ error: "Session destruction failed" });
-      }
-      res.clearCookie('connect.sid');
-      res.json({ message: "Logged out successfully" });
-    });
-  });
-});
+        <div className="manual-header">
+          <h1>Manual API Check - {hostingType === 'local' ? 'Local Hosted' : 'Cloud Hosted'}</h1>
+          <p>Enter {hostingType === 'local' ? 'any endpoint' : 'URL'} to scan for potential issues</p>
+        </div>
 
-// GitHub API routes
-app.get("/api/user/repos", isAuthenticated, async (req, res) => {
-  try {
-    const octokit = new Octokit({ auth: req.user.githubToken });
-    const { data } = await octokit.repos.listForAuthenticatedUser();
-    res.json(data);
-  } catch (error) {
-    console.error("Error fetching repositories:", error);
-    res.status(500).json({ error: "Failed to fetch repositories" });
-  }
-});
+        <div className="input-section">
+          {hostingType === 'local' && (
+            <div className="protocol-method-container">
+              <select
+                className="input-field select-field"
+                value={protocol}
+                onChange={(e) => setProtocol(e.target.value)}
+              >
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+              </select>
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: "Something broke!" });
-});
+              <input
+                type="number"
+                className="input-field port-field"
+                placeholder="Port (e.g., 3000)"
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+                min="1"
+                max="65535"
+              />
 
-// Add a simple root route to confirm the server is running
-app.get("/", (req, res) => {
-  res.send("CloudPatch API is running!");
-});
+              <select
+                className="input-field select-field"
+                value={method}
+                onChange={(e) => setMethod(e.target.value)}
+              >
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+            </div>
+          )}
+          
+          <input
+            type="text"
+            className="input-field api-field"
+            placeholder={hostingType === 'local' ? "Enter endpoint (e.g., users/profile, auth/login)" : "Enter full URL (e.g., https://api.example.com/endpoint)"}
+            value={apiUrl}
+            onChange={(e) => setApiUrl(e.target.value)}
+          />
+          
+          <button
+            className="check-button"
+            onClick={checkApi}
+            disabled={loading}
+          >
+            {loading ? <Loader className="icon-spin" /> : <Search className="icon" />}
+            <span>{loading ? "Scanning..." : "Scan API"}</span>
+          </button>
+        </div>
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+        {scanResults && (
+          <div className="result-card" ref={resultsRef}>
+            <div className="result-header">
+              <h2>Scan Results</h2>
+              {scanResults.is_local_server_error ? (
+                <div className="status error">
+                  <Server className="icon" />
+                  Local Server Error
+                </div>
+              ) : scanResults.scan_results?.errors_detected?.length > 0 ? (
+                <div className="status error">
+                  <AlertTriangle className="icon" />
+                  {scanResults.scan_results.errors_detected.length} Issues Found
+                </div>
+              ) : (
+                <div className="status success">
+                  <Check className="icon" />
+                  API Healthy
+                </div>
+              )}
+            </div>
+
+            <div className="result-content">
+              {/* Special UI for local server not running */}
+              {scanResults.is_local_server_error ? (
+                renderLocalServerError()
+              ) : (
+                <>
+                  <div className="info-card platform-info">
+                    <Code className="info-icon" />
+                    <div className="info-text">
+                      <h3 className="info-title">Platform</h3>
+                      <p className="info-value">{scanResults.platform || 'Unknown'}</p>
+                    </div>
+                  </div>
+
+                  <div className="info-card api-details">
+                    <div className="info-text">
+                      <h3 className="info-title">API Details</h3>
+                      <p className="info-value api-url">{scanResults.api_url}</p>
+                    </div>
+                  </div>
+
+                  {scanResults.scan_results?.errors_detected?.map((error, index) => (
+                    <div key={index} className="error-card">
+                      <div className="error-message">
+                        <h3><AlertTriangle className="icon error-icon" /> Issue {index + 1}</h3>
+                        <p>{error.error}</p>
+                      </div>
+                      
+                      <DownloadButton
+                        error={error}
+                        solution={scanResults.scan_results.solutions[index]}
+                        apiDetails={{
+                          api_url: scanResults.api_url,
+                          platform: scanResults.platform,
+                          status_code: scanResults.status_code,
+                          environment: scanResults.environment,
+                          performance_metrics: scanResults.additional_info?.performance_metrics
+                        }}
+                        isLoading={generatingPDF}
+                      />
+
+                      {scanResults.scan_results.solutions[index] && (
+                        <div className="solution-section">
+                          <h3 className="solution-title">Suggested Fix</h3>
+                          <pre className="solution-code">
+                            <code>
+                              {scanResults.scan_results.solutions[index].solution}
+                            </code>
+                          </pre>
+                          <button 
+                            onClick={() => handleAutoFix(error, scanResults.scan_results.solutions[index].solution)}
+                            disabled={applyingFix || scanResults.is_local}
+                            className="fix-button"
+                          >
+                            {applyingFix ? (
+                              <>
+                                <Loader className="icon-spin" />
+                                <span>Applying Fix...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Check className="icon" />
+                                <span>Apply Fix</span>
+                              </>
+                            )}
+                          </button>
+                          {scanResults.is_local && (
+                            <div className="local-fix-notice">
+                              <AlertTriangle className="icon" />
+                              <span>Auto-fix unavailable for local endpoints</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  {scanResults.error && !scanResults.scan_results?.errors_detected?.length && (
+                    <div className="error-card general-error">
+                      <div className="error-message">
+                        <h3><AlertTriangle className="icon error-icon" /> General Issue</h3>
+                        <p>{scanResults.error}</p>
+                      </div>
+                      {scanResults.solution && (
+                        <div className="solution-section">
+                          <h3 className="solution-title">Suggested Solution</h3>
+                          <p>{scanResults.solution}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default ManualCheck;
