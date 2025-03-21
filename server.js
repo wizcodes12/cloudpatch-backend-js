@@ -258,7 +258,90 @@ app.get("/api/network-test", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+// On your backend server
+app.post('/create-github-issue', async (req, res) => {
+  try {
+    const { title, body, returnUrl } = req.body;
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    
+    if (!token) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    
+    // Store the issue data in a temporary session or database
+    // Use a unique ID to reference it instead of passing all data in URL
+    const sessionId = generateUniqueId();
+    await storeTemporaryIssueData(sessionId, { token, title, body, returnUrl });
+    
+    // Return a redirect URL with just the session ID
+    res.json({
+      redirect_url: `${process.env.BASE_URL}/github-issue-creator-secure?session=${sessionId}`
+    });
+  } catch (error) {
+    console.error('Error creating issue:', error);
+    res.status(500).json({ error: 'Failed to prepare issue creation' });
+  }
+});
 
+// Then create a new endpoint that handles the actual GitHub issue creation
+app.get('/github-issue-creator-secure', async (req, res) => {
+  try {
+    const { session } = req.query;
+    if (!session) {
+      return res.status(400).send('Missing session ID');
+    }
+    
+    // Retrieve the stored issue data using the session ID
+    const issueData = await getTemporaryIssueData(session);
+    if (!issueData) {
+      return res.status(404).send('Session not found or expired');
+    }
+    
+    // Now use this data to render a page that will help create a GitHub issue
+    // This avoids exposing sensitive data in URLs
+    
+    // Render an HTML page that will handle GitHub repo selection and issue creation
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Create GitHub Issue</title>
+        <style>
+          /* Add your CSS here */
+        </style>
+      </head>
+      <body>
+        <h1>Create GitHub Issue</h1>
+        <div id="repo-selector">
+          <!-- JavaScript will populate this -->
+        </div>
+        
+        <script>
+          // Use session ID to fetch data securely from backend
+          const sessionId = "${session}";
+          
+          // Initialize page with the session data
+          async function init() {
+            try {
+              // JavaScript that handles repo selection and issue creation
+              // This will use the token securely from the backend, not exposing it in frontend
+            } catch (error) {
+              console.error('Error:', error);
+            }
+          }
+          
+          init();
+        </script>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error('Error serving issue creator page:', error);
+    res.status(500).send('An error occurred');
+  }
+});
 // Auth routes for Electron
 app.get("/auth/github-electron", (req, res) => {
   // Generate a unique state parameter
